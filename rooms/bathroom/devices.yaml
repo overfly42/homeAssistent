@@ -1,0 +1,4 @@
+# Shelly / satellite devices for this room.
+# Most Shelly devices are picked up automatically via MQTT discovery
+# (see common/shared_templates.yaml) - only list entities here that need
+# manual definition.

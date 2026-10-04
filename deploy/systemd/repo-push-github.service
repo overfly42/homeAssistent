@@ -1,0 +1,8 @@
+[Unit]
+Description=Push the sync Pi's bare repo to GitHub (one-way mirror)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/git --git-dir=/opt/homeAssistent.git push github main

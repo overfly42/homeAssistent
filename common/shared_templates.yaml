@@ -1,0 +1,8 @@
+# MQTT settings shared by every room. Room-specific automations/devices live
+# under rooms/<room>/ and reference topics as home/<room>/<thing>.
+
+broker: !secret mqtt_broker
+username: !secret mqtt_username
+password: !secret mqtt_password
+discovery: true
+discovery_prefix: homeassistant

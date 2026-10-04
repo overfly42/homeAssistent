@@ -1,0 +1,14 @@
+[Unit]
+Description=Per-room satellite MQTT agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=/etc/satellite/role
+EnvironmentFile=-/etc/satellite/mqtt.env
+ExecStart=/usr/bin/python3 /opt/homeAssistent/satellite-agent/agent.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

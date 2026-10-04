@@ -1,0 +1,8 @@
+# Config pulled by the kitchen satellite Pi into /opt/satellite/config/
+# (see deploy/deploy.sh). The Pi itself only ever knows its own room via
+# /etc/satellite/role (ROOM=kitchen) - everything else comes from this file.
+
+room: kitchen
+mqtt_topics:
+  publish:
+    - home/kitchen/maintenance_required

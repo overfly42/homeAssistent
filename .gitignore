@@ -1,0 +1,16 @@
+# Home Assistant secrets
+secrets.yaml
+.storage/
+
+# Docker / compose
+.env
+*.env
+
+# Ansible
+*.vault_pass
+vault_pass.txt
+
+# OS / editor cruft
+.DS_Store
+__pycache__/
+*.pyc

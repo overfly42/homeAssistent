@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Install on the sync Pi's bare repo as hooks/post-receive (copy or symlink
+# this file to /opt/homeAssistent.git/hooks/post-receive and chmod +x it).
+#
+# Runs after `git push` into the bare repo. Checks out main into the
+# working copy that satellites and the Home Assistant host actually pull
+# from - so a local push shows up for them immediately, without waiting
+# for their own poll timers to notice a change that was never there.
+set -euo pipefail
+
+WORK_TREE=/opt/homeAssistent
+BARE_REPO=/opt/homeAssistent.git
+
+while read -r _old_rev _new_rev ref; do
+  if [[ "$ref" == "refs/heads/main" ]]; then
+    git --work-tree="$WORK_TREE" --git-dir="$BARE_REPO" checkout -f main
+  fi
+done

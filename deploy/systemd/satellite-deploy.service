@@ -1,0 +1,8 @@
+[Unit]
+Description=Pull homeAssistent repo and apply this satellite's room config
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/homeAssistent/deploy/deploy.sh

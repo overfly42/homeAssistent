@@ -1,0 +1,10 @@
+[Unit]
+Description=Run repo-push-github.service every 2 minutes
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=2min
+Unit=repo-push-github.service
+
+[Install]
+WantedBy=timers.target

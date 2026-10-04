@@ -1,0 +1,17 @@
+# Automations scoped to this room.
+# Merged into the top-level `automation:` list by configuration.yaml.
+
+- alias: "Kitchen - Report maintenance required"
+  description: >
+    Example from the project description: a satellite reports an event
+    via MQTT, and a central HA automation translates it into a push
+    notification. The actual notify logic (who gets what) belongs in
+    common/; this is only the room-specific trigger.
+  trigger:
+    - platform: mqtt
+      topic: "home/kitchen/maintenance_required"
+  action:
+    - event: maintenance_required
+      event_data:
+        room: kitchen
+        message: "{{ trigger.payload }}"

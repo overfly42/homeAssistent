@@ -1,0 +1,10 @@
+[Unit]
+Description=Run repo-pull.service every 2 minutes
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=2min
+Unit=repo-pull.service
+
+[Install]
+WantedBy=timers.target

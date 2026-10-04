@@ -20,100 +20,206 @@ repo/
 ├── configuration.yaml     # central Home Assistant hub, includes rooms/ + common/
 ├── secrets.yaml.example   # copy to secrets.yaml (git-ignored), fill in real values
 ├── rooms/
-│   ├── kueche/{devices.yaml, automations.yaml, satellite.yaml}
-│   ├── badezimmer/{devices.yaml, automations.yaml}
-│   └── wohnzimmer/{devices.yaml, automations.yaml}
+│   ├── kitchen/{devices.yaml, automations.yaml, satellite.yaml}
+│   ├── bathroom/{devices.yaml, automations.yaml}
+│   └── living_room/{devices.yaml, automations.yaml}
 ├── common/shared_templates.yaml
+├── satellite-agent/
+│   ├── agent.py            # per-room MQTT heartbeat, restarted by deploy.sh
+│   └── requirements.txt
 └── deploy/
     ├── deploy.sh           # runs on each satellite Pi via systemd timer
-    └── systemd/            # satellite-deploy.service + .timer (polling pull, ~2 min)
+    ├── git-hooks/
+    │   └── post-receive    # installed on the sync Pi's bare repo
+    └── systemd/            # satellite-deploy.{service,timer} (polling pull, ~2 min)
+                             # + satellite-agent.service (runs agent.py)
+                             # + repo-pull.{service,timer} (plain `git pull`,
+                             #   for the Home Assistant host)
+                             # + repo-push-github.{service,timer} (sync Pi
+                             #   pushes its bare repo to GitHub, one-way)
 ```
 
 Room names above are placeholders from the project doc below - rename/add
 `rooms/<room>/` directories to match your actual house.
 
-See `Hausautomatisierung Projektbeschreibung und Kontext.md` below for the
-full architecture and the reasoning behind these decisions.
+See "Home Automation: Project Description and Context" below for the full
+architecture and the reasoning behind these decisions.
 
-# Hausautomatisierung: Projektbeschreibung und Kontext
- 
+# Home Automation: Project Description and Context
+
 2026-09-17 · @Someone
- 
-## Überblick
- 
-Ziel des Projekts ist eine Hausautomatisierung auf Basis von Shelly-Geräten, gesteuert über Home Assistant als zentralen Hub, mit Raspberry Pis als dezentralen Satelliten (z. B. pro Raum). Konfiguration und Automatisierungslogik werden per GitOps verwaltet: Änderungen landen im Git-Repo und werden von dort automatisiert auf die betroffenen Geräte ausgerollt, ohne manuelles Kopieren oder SSH-Handarbeit.
- 
-## Architektur
- 
-- **Zentraler Hub**: Raspberry Pi 4/5 oder Mini-PC mit Home Assistant, verwaltet alle Shelly-Geräte lokal (native Integration, keine Cloud-Abhängigkeit)
-- **Satelliten**: weitere Raspberry Pis, je einem Raum zugeordnet (Küche, Badezimmer, ...), betreiben z. B. ESPHome-Satelliten, MQTT-Bridges, Node-RED oder eigene Docker-Container
-- **Git-Repo**: Single Source of Truth für alle Configs (Home-Assistant-YAMLs, ESPHome-Definitionen, Docker-Compose-Dateien, Ansible-Playbooks)
-Jeder Satellit kennt nur seine eigene Rolle (den Raum, dem er zugeordnet ist) und bezieht die passende Konfiguration automatisiert aus dem zentralen Repo.
- 
-## Deployment-Mechanismus
- 
-Zwei mögliche Ansätze, empfohlen wird Pull für ein Heimnetz ohne öffentlich erreichbare Server:
- 
-**Pull via systemd (empfohlen)**
- 
-1. Deploy-Agent auf jedem Pi läuft per systemd-Timer (alle 1–5 Min)
-2. Ablauf: `git pull` → Diff prüfen → bei Änderung: Config validieren, Dienst neu laden/`docker compose up -d --build`
-3. Für ESPHome-Satelliten: CI baut die Firmware (`esphome compile` via GitHub Actions), Gerät zieht sich das Image per OTA
-**Push via CI (GitHub Actions + Ansible)**
- 
-- Bei Push auf `main`: (self-hosted) Actions Runner im lokalen Netz führt Syntax-Checks aus
-- `ansible-playbook` verteilt Configs per SSH an alle Zielgeräte, restartet Dienste
-- Vorteil: sofortiges Deployment, klarer Trigger, Rollback über Git-Revert + erneuten Playbook-Lauf
-Vor jedem Deploy: Config-Validierung (z. B. `hass --script check_config`), damit ein fehlerhafter Commit den Hub nicht lahmlegt.
- 
-### Zweistufiges Push/Pull-Modell (Entscheidung)
- 
-Ein zentraler lokaler Pi ist der einzige Netzwerkteilnehmer mit Internetzugriff. Er holt Änderungen per **Pull von GitHub** und verteilt sie anschließend intern per **Push bzw. Pull-Trigger** an die Satelliten-Pis – weder Shelly-Geräte noch Satelliten-Pis erhalten Internetzugriff.
- 
-**Alternativen für den GitHub-Pull auf dem zentralen Pi**
- 
-| Methode | Funktionsweise | Abwägung |
+
+## Overview
+
+The goal of this project is home automation based on Shelly devices,
+controlled via Home Assistant as a central hub, with Raspberry Pis as
+decentralized satellites (e.g. one per room). Configuration and automation
+logic are managed via GitOps: changes land in the Git repo and are rolled
+out from there automatically to the affected devices, with no manual
+copying or SSH work.
+
+## Architecture
+
+- **Sync/broker Pi**: the source of truth for day-to-day work. Hosts a
+  bare git repo that local development pushes into directly over SSH (not
+  GitHub), runs the MQTT broker, and keeps a working copy that satellite
+  Pis and the Home Assistant host each pull their config from (via their
+  own systemd timers). Separately pushes that repo to GitHub on its own
+  timer, one-way, so GitHub stays an up-to-date downstream mirror rather
+  than the source of truth
+- **Home Assistant host**: a separate bare-metal machine (no Docker)
+  running Home Assistant, manages all Shelly devices (native integration,
+  no cloud dependency). It does have its own internet access, but
+  deliberately doesn't use it for config sync - it pulls from the sync
+  Pi's working copy over the local network instead, via its own systemd
+  timer, and connects to the MQTT broker on the sync Pi for device
+  discovery/control
+- **Satellites**: additional Raspberry Pis, each assigned to a room
+  (kitchen, bathroom, ...), running `satellite-agent` (`satellite-agent/agent.py`,
+  restarted after every deploy) plus e.g. ESPHome satellites, MQTT bridges,
+  Node-RED, or their own Docker containers. They don't talk to the Shelly
+  devices directly (at least for now) - Shelly devices go straight to the
+  MQTT broker on the sync Pi, independent of the satellites
+- **Git repo**: single source of truth for all configs (Home Assistant
+  YAMLs, ESPHome definitions, Docker Compose files, Ansible playbooks)
+
+```
+ Dev workstation                                         GitHub
+        │                                          (downstream mirror,
+        │ git push (SSH, bare repo)                 not pulled from)
+        ▼                                                  ▲
+┌────────────────────────────┐                             │
+│       Sync/broker Pi        │   git push (systemd timer,  │
+│  bare repo (source of       │───one-way, ~2 min)──────────┘
+│  truth) + working copy      │
+│  (post-receive hook keeps   │
+│  it current) + MQTT broker  │
+│  (has internet access)      │
+└──────────────┬──────────────┘
+               │ git pull (own systemd timer per consumer,
+               │ local network only)
+     ┌─────────┼─────────────────────────┐
+     ▼         ▼                         ▼
+ Satellite  Satellite            Home Assistant host
+ Pi(kitchen) Pi(bathroom)       (bare metal, has its own
+                                 internet access but doesn't
+                                 use it for config sync)
+                                          │
+                                          │ MQTT discovery +
+                                          │ device control
+                                          ▼
+                                 Shelly devices
+                                 (MQTT, local network)
+
+  (local network only below the sync Pi - no internet access for
+   satellite Pis or Shelly devices)
+```
+
+Each satellite only knows its own role (the room it's assigned to) and
+pulls the matching config itself from the sync Pi's working copy. The Home
+Assistant host, in contrast, pulls the full repo and is not filtered by
+room - but both pull from the same place: the sync Pi, never GitHub
+directly.
+
+## Deployment mechanism
+
+**Decision: push in once, pull out twice, mirror out one-way.**
+Development changes are pushed directly (over SSH) into a bare repo on
+the sync Pi - see "Git flow" below for why GitHub isn't the primary
+remote anymore. From there, two independent consumers - satellite Pis and
+the Home Assistant host - each pull via their own systemd timer (every
+1-5 min), check the diff, and on change validate config and reload the
+service / `docker compose up -d --build` (for satellites that use Docker;
+the Home Assistant host is bare metal, so it's a direct `hass`
+restart/reload there instead). For ESPHome satellites: CI builds the
+firmware (`esphome compile` via GitHub Actions, off the GitHub mirror),
+the device pulls the image via OTA.
+
+A push-based distribution alternative (the sync Pi actively pushing
+configs out via `ansible-playbook`/SSH instead of consumers pulling) was
+considered and rejected: it needs the sync Pi to know which devices exist
+and are currently reachable, instead of each device just catching up on
+its own next tick. Pulling out is simpler to reason about and debug -
+consistent with why pushing in is only used for the one step that
+actually needs a human in the loop (local development).
+
+Before every deploy: config validation (e.g. `hass --script
+check_config`), so a broken commit doesn't take down the hub.
+
+### Git flow: local push, GitHub as mirror (decision)
+
+Local development pushes straight into a bare repo on the sync Pi over
+SSH - that bare repo, not GitHub, is the source of truth. A
+`post-receive` hook (`deploy/git-hooks/post-receive`) checks out the new
+commit into a working copy on the sync Pi immediately, so pushes show up
+for satellites/the HA host without waiting on a poll timer that was never
+watching GitHub to begin with. Separately, the sync Pi pushes that bare
+repo to GitHub on its own systemd timer (`deploy/systemd/repo-push-github.{service,timer}`),
+one-way - GitHub becomes a downstream mirror (useful as an off-site
+backup, and for the "take this as inspiration" framing at the top of this
+file), not part of the deployment path.
+
+This is also why the Home Assistant host pulls from the sync Pi instead
+of GitHub even though it has its own internet access: one source of truth
+for the whole deployment path, with GitHub only entering via the one-way
+mirror push.
+
+**Alternatives for getting local commits to GitHub**
+
+| Method | How it works | Trade-off |
 | --- | --- | --- |
-| Periodischer `git pull` (Polling) | systemd-Timer/Cron ruft alle 1–5 Min `git pull` | Einfachste Lösung, nur ausgehende HTTPS-Verbindung nötig; Verzögerung bis zu Intervall-Länge |
-| Self-hosted GitHub Actions Runner | Runner läuft auf dem Pi, baut nur ausgehende Verbindung zu GitHub auf, wird bei Push sofort aktiviert | Praktisch verzögerungsfrei, kein offener Port nötig; zusätzlicher Dienst zu pflegen |
-| Webhook-Relay (z. B. smee.io) | GitHub-Webhook wird über einen ausgehend aufgebauten Tunnel an einen lokalen Empfänger weitergeleitet | Sofortige Reaktion ohne Portfreigabe; Abhängigkeit von externem Relay-Dienst |
-| git-sync (Sidecar-Tool) | Fertiges Tool, hält einen Git-Ordner kontinuierlich synchron | Alternative zu eigenem Polling-Skript, weniger Wartungsaufwand |
- 
-**Entscheidung: Polling-Timer.** Für ein privates Heimnetz ohne Team und ohne Eile bei Deployments ist der einfache `git pull` per systemd-Timer sowohl am einfachsten als auch am robustesten:
- 
-- Trivial zu debuggen ("läuft der Timer? was sagt `git pull`?"), keine zusätzlichen Abhängigkeiten
-- Kein zusätzlicher Dienst, der selbst überwacht werden müsste – ein Actions Runner kann selbst abstürzen, ohne dass es sofort auffällt
-- Kein Henne-Ei-Problem bei fehlender Internetverbindung: verpasste Zyklen holen sich beim nächsten erfolgreichen `git pull` einfach den aktuellen Stand
-- Die Verzögerung von wenigen Minuten gegenüber "sofort" spielt bei Hausautomatisierung praktisch keine Rolle
-**Verworfen**: Self-hosted Actions Runner (lohnt sich erst bei mehreren gleichzeitig committenden Personen mit Bedarf an sofortigem Feedback – unnötige Komplexität für ein Ein-Personen-Setup) sowie Webhook-Relay (zusätzliche externe Abhängigkeit ohne echten Vorteil hier). git-sync bleibt als spätere Option denkbar, ist aber gegenüber dem simplen Timer kein Gewinn.
- 
-**Verteilung an die Satelliten (nur internes Netzwerk)**
- 
-1. Zentraler Pi zieht das Repo von GitHub und hält lokal eine aktuelle Kopie (z. B. lokaler Git-Mirror oder Dateiserver)
-2. Verteilung per **Push**: zentraler Pi kopiert per SSH/Ansible/rsync die passenden `rooms/$ROOM/`-Configs direkt auf die Satelliten
-3. Alternativ **Pull-Trigger via MQTT**: zentraler Pi publiziert nach erfolgreichem Sync eine Nachricht wie `home/$ROOM/deploy` mit Versionskennung; der Satellit holt sich daraufhin seine Config per rsync/HTTP vom zentralen Pi (nicht von GitHub)
-MQTT dient hier als entkoppelnder Kommunikationsstandard: Satelliten müssen den zentralen Pi nicht aktiv abfragen, und der zentrale Pi muss die Erreichbarkeit einzelner Satelliten nicht kennen – beide Seiten kommunizieren nur über den Broker.
- 
-## Raumbasierte Konfigurationsstruktur
- 
-Prinzip: vollständiger Raum-Katalog liegt zentral im Repo, jeder Pi kennt lokal nur seine eigene Rollen-Kennung (welcher Raum er ist) und zieht sich beim Deployment nur die passende Teilkonfiguration.
- 
-**Repo-Layout**
- 
+| Periodic `git push` (polling) | systemd timer calls `git push github main` every ~2 min | Simplest, matches the polling pattern used everywhere else in this repo; delay up to the interval length |
+| Push immediately via `post-receive` hook | The same hook that updates the working copy also pushes to GitHub right away | No delay; ties GitHub's availability to every local push succeeding, another thing the hook can fail on |
+| Manual push | You run `git push github main` yourself when ready | No automation to maintain, but easy to forget and let the mirror go stale |
+
+**Decision: periodic push via systemd timer.** Same reasoning as the
+polling-pull decisions elsewhere in this doc: trivial to debug, no extra
+dependency on hook reliability, and a mirror that's a couple of minutes
+behind is fine since nothing in the deployment path depends on GitHub
+being current.
+
+**Distribution to the satellites and the Home Assistant host (internal
+network only)**
+
+1. Local development pushes into the sync Pi's bare repo (see above); the
+   `post-receive` hook updates its working copy
+2. Each satellite Pi and the Home Assistant host pull directly from that
+   working copy on their own systemd timer - satellites via
+   `deploy/deploy.sh` + `deploy/systemd/satellite-deploy.{service,timer}`,
+   the HA host via the generic `deploy/systemd/repo-pull.{service,timer}` -
+   satellites additionally rsync their own `rooms/$ROOM/` + `common/` into
+   local config and restart their service
+
+**Decision: pull, not push, for this hop too.** Satellites and the HA
+host pull rather than the sync Pi pushing to them - no SSH/Ansible/rsync
+push step, no MQTT pull-trigger needed either. Same reasoning throughout:
+fewer moving parts, the sync Pi never needs to know which consumers exist
+or are currently reachable, and an offline consumer just catches up on
+its next tick.
+
+## Room-based configuration structure
+
+Principle: the full room catalog lives centrally in the repo; each Pi only
+knows its own role locally (which room it is) and pulls only the matching
+partial config at deploy time.
+
+**Repo layout**
+
 ```
 repo/
 ├── rooms/
-│   ├── kueche/{devices.yaml, automations.yaml, satellite.yaml}
-│   ├── badezimmer/{devices.yaml, automations.yaml}
-│   └── wohnzimmer/...
+│   ├── kitchen/{devices.yaml, automations.yaml, satellite.yaml}
+│   ├── bathroom/{devices.yaml, automations.yaml}
+│   └── living_room/...
 ├── common/shared_templates.yaml
 └── deploy/deploy.sh
 ```
- 
-**Auf dem Pi (nicht im Repo, lokal angelegt)**: `/etc/satellite/role` mit z. B. `ROOM=kueche`
- 
-**Deploy-Skript**
- 
+
+**On the Pi (not in the repo, created locally)**: `/etc/satellite/role`
+with e.g. `ROOM=kitchen`
+
+**Deploy script**
+
 ```bash
 source /etc/satellite/role
 git pull
@@ -121,66 +227,215 @@ rsync -a --delete repo/rooms/$ROOM/ /opt/satellite/config/
 rsync -a repo/common/ /opt/satellite/config/common/
 systemctl restart satellite-agent
 ```
- 
-Der Pi bleibt so austauschbar: neu flashen, `ROOM` lokal setzen, Agent starten – Rest kommt automatisch aus dem Repo. Das Repo selbst kennt keine physische Zuordnung Pi↔Raum. Der zentrale Home-Assistant-Hub durchläuft die gesamte `rooms/`-Struktur ohne Filterung.
- 
-## Sicherheit und Secrets-Management
- 
-**Öffentliches Repo**: Automatisierungslogik (Skripte, Playbooks, Compose-Struktur, ESPHome-Basis-YAMLs) kann öffentlich sein – reiner Code, keine Geheimnisse. Kritisch werden erst: IP-Adressen/Hostnamen/Portfreigaben, Gerätenamen mit Rückschlüssen auf Anwesenheit, API-Tokens/WLAN-Passwörter/MQTT-Zugangsdaten, Grundrisse/Raumnamen in Kombination mit Kamera-/Sensor-Setups. Faustregel: Struktur öffentlich, Werte privat.
- 
-**Netzwerksegmentierung**: Nur der zentrale Pi hat Internetzugriff (für den GitHub-Pull); Shelly-Geräte und Satelliten-Pis erhalten keinerlei Internetzugriff und kommunizieren ausschließlich innerhalb des lokalen Netzes (MQTT-Broker, SSH, rsync). Empfehlenswert: eigenes VLAN bzw. Firewall-Regeln, die ausgehenden Internetverkehr für das Shelly-/Satelliten-Subnetz komplett blockieren.
- 
-**Wo Passwörter liegen**
- 
-| Bereich | Mechanismus |
+
+This keeps the Pi interchangeable: reflash it, set `ROOM` locally, start
+the agent - everything else comes automatically from the repo. The repo
+itself has no concept of the physical Pi-to-room mapping. The Home
+Assistant host walks the entire `rooms/` structure unfiltered.
+
+**The agent being restarted**: `satellite-agent` (`satellite-agent/agent.py`
+in this repo, installed via `deploy/systemd/satellite-agent.service`) is
+what actually runs continuously on the Pi. Today it's a minimal heartbeat
+- it connects to the MQTT broker on the sync Pi and publishes
+`home/$ROOM/status` (`online`, with `offline` as its MQTT last-will), so
+Home Assistant can tell whether a satellite is reachable. It's the
+concrete place to add real per-room logic later (sensors, the CO2
+measurement mentioned at the top of this file, etc.) - `deploy.sh`
+restarting it after every pull means config changes take effect without a
+manual step. Broker connection details for the agent live in
+`/etc/satellite/mqtt.env` (local to each Pi, not in the repo - same
+pattern as `/etc/satellite/role`).
+
+## Security and secrets management
+
+**Public repo**: automation logic (scripts, playbooks, compose structure,
+base ESPHome YAMLs) can be public - it's just code, no secrets. What
+becomes critical: IP addresses/hostnames/port forwards, device names that
+reveal presence, API tokens/WiFi passwords/MQTT credentials, floor plans/
+room names combined with camera/sensor setups. Rule of thumb: structure
+public, values private.
+
+**Network segmentation**: the sync/broker Pi has internet access (it's the
+only device that talks to GitHub, as a one-way push mirror). The Home
+Assistant host, being bare metal, has its own internet access too, but
+doesn't rely on it for config sync - it pulls from the sync Pi over the
+local network like everything else downstream. Shelly devices and
+satellite Pis get no internet access at all and communicate exclusively
+within the local network (MQTT broker, SSH, rsync). Recommended: a
+dedicated VLAN or firewall rules that fully block outgoing internet
+traffic for the Shelly/satellite subnet. Pushing into the sync Pi's bare
+repo (local development) requires SSH access from the workstation doing
+the pushing - local network or VPN, not exposed to the public internet.
+
+**Where passwords live**
+
+| Area | Mechanism |
 | --- | --- |
-| Home Assistant | `secrets.yaml` (per `.gitignore` ausgeschlossen), im Repo nur `secrets.yaml.example` |
-| Ansible | `ansible-vault` (AES-256-verschlüsselt, kann im Repo bleiben), Vault-Passwort separat |
-| Docker/Compose | lokale `.env`-Datei pro Gerät, referenziert per `${VAR}`, in `.gitignore` |
-| Mehrere Geräte zentral | Secrets-Manager wie HashiCorp Vault oder self-hosted Vaultwarden |
-| SSH zwischen Pis | Key-based Auth statt Passwörtern |
- 
-Zusätzlich empfohlen: GitHub Secret-Scanning aktivieren, `git-crypt` oder `sops` als Alternative/Ergänzung zu ansible-vault für weitere verschlüsselte Dateien.
- 
-## Kommunikation Skript ↔ Home Assistant
- 
-| Methode | Einsatz |
+| Home Assistant | `secrets.yaml` (excluded via `.gitignore`), repo only has `secrets.yaml.example` |
+| `satellite-agent` (MQTT broker creds) | `/etc/satellite/mqtt.env`, local to each Pi, never in the repo - same pattern as `/etc/satellite/role` |
+| Ansible | `ansible-vault` (AES-256 encrypted, can stay in the repo), vault password kept separately |
+| Docker/Compose | local `.env` file per device, referenced via `${VAR}`, in `.gitignore` |
+| Multiple devices, centrally | a secrets manager like HashiCorp Vault or self-hosted Vaultwarden |
+| SSH between Pis, and from dev workstation into the sync Pi's bare repo | key-based auth instead of passwords |
+
+Also recommended: enable GitHub secret scanning, and `git-crypt` or `sops`
+as an alternative/addition to ansible-vault for further encrypted files.
+
+## Communication: script ↔ Home Assistant
+
+| Method | Use case |
 | --- | --- |
-| REST API | Einfachster Weg: Long-Lived Access Token, Zustände lesen/Services aufrufen per `curl`/`requests`; gut für seltene/einmalige Aufrufe |
-| WebSocket API | Echtzeit-Reaktion auf Zustandsänderungen statt Polling; komplexer (Auth-Handshake, Subscriptions) |
-| MQTT | Passt zur raumbasierten Satelliten-Struktur: Pi publiziert auf Topics, HA erkennt Entitäten automatisch per MQTT-Discovery, keine API-Calls nötig |
-| Home Assistant CLI (`hass-cli`) | Für einfache Kommandozeilen-Interaktion direkt auf dem HA-Host |
-| AppDaemon / pyscript | Für komplexere Logik (State-Machines), läuft als eigener Prozess mit direktem Zugriff auf den State-Machine-Kontext |
- 
-Für die Satelliten-Pis empfiehlt sich MQTT als primärer Kanal, da Topic-Namen einfach pro Raum-Ordner im Repo mitverwaltet werden können; REST API eignet sich ergänzend für Status-Checks beim Deploy-Start.
- 
-**Entscheidung**: MQTT wird als primärer Kommunikationsstandard zwischen den Systemen festgelegt, da es diese entkoppelt (kein gegenseitiges Kennen von Adressen/Erreichbarkeit nötig) und sich sauber mit der Netzwerksegmentierung verträgt, bei der Shelly-Geräte und Satelliten keinen Internetzugriff haben.
- 
-## Benachrichtigungen an die Companion App
- 
-Home Assistant stellt für jedes verknüpfte Handy automatisch einen `notify.mobile_app_<gerätename>`-Service bereit. Ein Pi-Skript ruft nicht direkt die App an, sondern löst über HA (REST, MQTT-Automation) diesen Service aus – HA übernimmt die Zustellung.
- 
-**Beispiel per REST**
- 
+| REST API | Simplest route: long-lived access token, read states/call services via `curl`/`requests`; good for rare/one-off calls |
+| WebSocket API | Real-time reaction to state changes instead of polling; more complex (auth handshake, subscriptions) |
+| MQTT | Fits the room-based satellite structure: Pi publishes to topics, HA discovers entities automatically via MQTT discovery, no API calls needed |
+| Home Assistant CLI (`hass-cli`) | For simple command-line interaction directly on the HA host |
+| AppDaemon / pyscript | For more complex logic (state machines), runs as its own process with direct access to the state machine context |
+
+For the satellite Pis, MQTT is recommended as the primary channel, since
+topic names can simply be managed alongside each room folder in the repo;
+the REST API is a good fit as a supplement for status checks at deploy
+start.
+
+**Decision**: MQTT is set as the primary communication standard between
+the systems, since it decouples them (no need for either side to know the
+other's addresses/reachability) and fits cleanly with the network
+segmentation where Shelly devices and satellites have no internet access.
+
+## Notifications to the companion app
+
+Home Assistant automatically provides a
+`notify.mobile_app_<device_name>` service for every linked phone. A Pi
+script doesn't call the app directly, but triggers this service via HA
+(REST, MQTT automation) - HA handles delivery.
+
+**Example via REST**
+
 ```bash
 curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d '{"message": "Blumen in der Küche gießen", "title": "Manuelle Aufgabe"}' \
-  http://homeassistant.local:8123/api/services/notify/mobile_app_dein_handy
+  -d '{"message": "Water the kitchen plants", "title": "Manual task"}' \
+  http://homeassistant.local:8123/api/services/notify/mobile_app_your_phone
 ```
- 
-**Interaktive Benachrichtigungen (actionable notifications)**: Buttons wie "Erledigt"/"Später erinnern" lassen sich einbauen; HA fängt den Klick als Event ab und kann darauf reagieren (z. B. `input_boolean` zurücksetzen).
- 
-**Empfohlener Ablauf für die raumbasierte Architektur**
- 
-1. Pi meldet Ereignis per MQTT, z. B. `home/kueche/wartung_erforderlich`
-2. Zentrale HA-Automatisierung lauscht raumunabhängig auf `home/+/wartung_erforderlich` und übersetzt es in eine `notify`-Aktion an die passende Person
-3. Notify-Logik (wer bekommt was) bleibt zentral in HA gepflegt; der Pi kennt nur ein einfaches MQTT-Event, keine Personen- oder App-Endpunkte – die gemeinsame Automatisierungsregel liegt als YAML im `common/`-Ordner des Repos
-## Offene Punkte und nächste Schritte
- 
-- [ ] Deploy-Skript um Validierung erweitern: prüfen, ob der in `ROOM` angegebene Ordner im Repo existiert, bevor rsync läuft
-- [ ] \~\~Konkrete Pull-Methode wählen\~\~ – entschieden: Polling-Timer (siehe Deployment-Mechanismus)
-- [ ] Secrets-Management-Werkzeug festlegen (ansible-vault vs. zentraler Vault/Vaultwarden)
-- [ ] MQTT-Discovery-Payload-Vorlage für die Raum-Struktur ausarbeiten
-- [ ] Konkrete Automatisierungsregel für Wartungsmeldung → Push-Benachrichtigung im `common/`-Ordner definieren
-- [ ] Secret-Scanning bei öffentlichem Repo aktivieren
- 
+
+**Interactive notifications (actionable notifications)**: buttons like
+"Done"/"Remind me later" can be built in; HA captures the click as an
+event and can react to it (e.g. reset an `input_boolean`).
+
+**Recommended flow for the room-based architecture**
+
+1. Pi reports an event via MQTT, e.g. `home/kitchen/maintenance_required`
+2. A central HA automation listens room-independently on
+   `home/+/maintenance_required` and translates it into a `notify` action
+   for the right person
+3. Notify logic (who gets what) stays centrally maintained in HA; the Pi
+   only knows a simple MQTT event, no person or app endpoints - the shared
+   automation rule lives as YAML in the repo's `common/` folder
+
+**Language convention**
+
+Code and identifiers are English; user-facing text is German.
+
+- English, ASCII only: MQTT topics, event names, entity IDs, file and
+  directory names, `ROOM=` values. They are matched by exact string.
+- German (UTF-8 is fine): notification `title`/`message`, entity friendly
+  names, dashboard labels, automation `alias`/`description` shown in the UI.
+- No logic on translated strings: the Pi publishes a stable key such as
+  `filter_clogged`, and the central automation maps it to German text
+  (e.g. "Küche: Filter wechseln"). The German wording lives centrally, not
+  in each room.
+
+## Initial installation
+
+Bootstrap steps per host role, run once per device. After this, the
+push/pull timers keep everything up to date automatically - no further
+manual steps.
+
+**Sync/broker Pi**
+
+1. Create the bare repo that local development will push into, seeded
+   from GitHub the first time only: `sudo git clone --bare
+   <your-repo-url> /opt/homeAssistent.git`
+2. Check out the working copy that satellites/the HA host will pull from:
+   `sudo git clone /opt/homeAssistent.git /opt/homeAssistent`
+3. Install the hook that keeps that working copy current on every push:
+   `sudo cp deploy/git-hooks/post-receive
+   /opt/homeAssistent.git/hooks/post-receive && sudo chmod +x
+   /opt/homeAssistent.git/hooks/post-receive`
+4. Add GitHub as a push-only remote on the bare repo: `sudo git
+   --git-dir=/opt/homeAssistent.git remote add github <your-repo-url>`
+5. Install an MQTT broker, e.g. Mosquitto: `sudo apt install mosquitto
+   mosquitto-clients`, then configure a username/password - these also go
+   into `secrets.yaml` (Home Assistant side) and `/etc/satellite/mqtt.env`
+   (satellite side), see Security and secrets management below
+6. Serve the working copy so satellites and the HA host can pull from it,
+   e.g. `git daemon --base-path=/opt --export-all --reuseaddr` as its own
+   systemd service, or any simple local git/HTTP server - the exact
+   mechanism isn't fixed in this repo yet (see Open points), pick
+   whichever fits your network
+7. Install the push-to-GitHub timer: `sudo cp
+   deploy/systemd/repo-push-github.{service,timer} /etc/systemd/system/`,
+   then `sudo systemctl daemon-reload && sudo systemctl enable --now
+   repo-push-github.timer`
+
+**Developer workstation (one-time, per machine you'll push from)**
+
+1. Add the sync Pi as a remote: `git remote add sync
+   ssh://<user>@<sync-pi-host>/opt/homeAssistent.git`
+2. From then on, `git push sync main` sends local commits straight to the
+   sync Pi - that's the actual deploy trigger, not `git push origin`/GitHub
+
+**Home Assistant host**
+
+1. Install Home Assistant Core directly on the host (bare metal, no
+   Docker - outside this repo's scope beyond that)
+2. Clone from the sync Pi's working copy, not GitHub, to wherever HA's
+   config directory points at: `sudo git clone
+   <sync-pi>:/opt/homeAssistent /opt/homeAssistent` (or point HA's
+   `config_dir` at that path directly)
+3. Copy `secrets.yaml.example` to `secrets.yaml` inside that config
+   directory and fill in real values - never commit `secrets.yaml` itself
+4. Install the generic pull timer: `sudo cp
+   deploy/systemd/repo-pull.{service,timer} /etc/systemd/system/`, then
+   `sudo systemctl daemon-reload && sudo systemctl enable --now
+   repo-pull.timer` - this pulls from the sync Pi, not GitHub, even though
+   this host has its own internet access
+5. Validate before relying on it: `hass --script check_config -c
+   /opt/homeAssistent` run directly on the host (per `CLAUDE.md`, ask
+   before running this against a live instance)
+
+**Satellite Pi (per room)**
+
+1. Flash Raspberry Pi OS and get it on the local network
+2. Create `/etc/satellite/role` with e.g. `ROOM=kitchen` (must match an
+   existing `rooms/<room>/` directory in the repo)
+3. Create `/etc/satellite/mqtt.env` with `MQTT_BROKER=`, `MQTT_USERNAME=`,
+   `MQTT_PASSWORD=` pointing at the sync Pi's broker - neither file is
+   part of the repo, same as `/etc/satellite/role`
+4. Clone the repo from the sync Pi's working copy, not GitHub - satellites
+   have no internet access: `sudo git clone <sync-pi-mirror-url>
+   /opt/homeAssistent`
+5. Install the agent's Python dependencies: `pip install -r
+   /opt/homeAssistent/satellite-agent/requirements.txt`
+6. Install the units: `sudo cp
+   /opt/homeAssistent/deploy/systemd/satellite-deploy.{service,timer}
+   /opt/homeAssistent/deploy/systemd/satellite-agent.service
+   /etc/systemd/system/`, then `sudo systemctl daemon-reload && sudo
+   systemctl enable --now satellite-deploy.timer satellite-agent.service`
+7. The first deploy runs on the next timer tick, or trigger it manually:
+   `sudo /opt/homeAssistent/deploy/deploy.sh`
+
+## Open points and next steps
+
+- [x] Extend the deploy script with validation: check that the folder
+  named by `ROOM` exists in the repo before rsync runs (done in
+  `deploy/deploy.sh`)
+- [x] ~~Pick a concrete pull method~~ - decided: polling timer (see
+  Deployment mechanism)
+- [ ] Decide on a secrets management tool (ansible-vault vs. a central
+  Vault/Vaultwarden)
+- [ ] Work out an MQTT discovery payload template for the room structure
+- [ ] Define the concrete automation rule for maintenance notice → push
+  notification in the `common/` folder
+- [ ] Enable secret scanning on the public repo
+- [ ] Pick and script the local git mirror mechanism the sync Pi serves to
+  satellites (`git daemon` vs. a simple local HTTP/git server) - currently
+  just a manual step in Initial installation, not templated in `deploy/`

@@ -1,0 +1,13 @@
+# Central Home Assistant hub config.
+# Walks the whole rooms/ structure unfiltered - the repo has no concept of
+# which physical Pi maps to which room, only the satellites do (/etc/satellite/role).
+
+homeassistant:
+  packages: !include_dir_named common
+
+# Picks up every rooms/<room>/automations.yaml and merges them into one list.
+automation: !include_dir_merge_list rooms/
+
+# Picks up every rooms/<room>/devices.yaml and merges them (MQTT discovery
+# mostly makes this unnecessary, but it's here for manually defined entities).
+mqtt: !include common/shared_templates.yaml

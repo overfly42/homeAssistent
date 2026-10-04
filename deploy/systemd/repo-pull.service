@@ -1,0 +1,8 @@
+[Unit]
+Description=Pull the homeAssistent repo from the sync Pi (no further action)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/git -C /opt/homeAssistent pull --ff-only
